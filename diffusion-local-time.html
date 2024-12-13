@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Diffusion Local Time</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        html {
+          box-sizing: border-box;
+          font-size: 16px;
+        }
+        body {
+            font-family: Roboto;
+        }
+        fieldset {
+            border: none;
+        }
+        #boddy {
+            background-color: black;
+            color: white;
+        }
+        #prompt {
+            width: 512px;
+            height: 3em;
+        }
+        #prompt-defaults, #conditioning-scale {
+            width: 256px;
+        }
+        #tweencanvas { height: 2em; width: 2em; opacity: 0.5;}
+        #timing { font-family: monospace; opacity: 0.5;}
+        @font-face{font-family:"Roboto";font-style:normal;font-weight:400;src:url(./roboto-slab.ttf) format("truetype")}
+        @font-face{font-family:"Roboto";font-style:normal;font-weight:700;src:url(./roboto-slab-bold.ttf) format("truetype")}
+
+    </style>
+</head>
+    <body>
+        <h1>Diffusion Local Time extra small</h1>
+        <h2>by Lee Butterman</h2>
+        <h2>
+            <!-- dropdown for sample prompts -->
+            <select id="prompt-defaults">
+                <option value="sunrise closeup of a desert landscape with large boulders and small boulders on a shallow lake bed surrounded by tall mountains">desert</option>
+                <option value="seashells on a beach">beach</option>
+                <option value="photo of cinnamon sticks and cardamom pods and cloves and peppercorns and star anise on a cutting board">spices</option>
+                <option value="ferns and boulders by a fast stream in a redwood forest with animals">redwoods</option>
+                <option selected="selected" value="underwater photo of kelp and starfish and sea anemones and turtles and small fish and sponges and coral">aquarium</option>
+                <option value="custom">custom diy :)</option>
+            </select><input type="range" id="conditioning-scale" min="30" max="100" value="65" /><br>
+            <textarea id="prompt" disabled="disabled" cols="3" ></textarea></h2>
+            <h1><canvas id="canvas" width="512" height="512" style="border:1px solid #000000;"></canvas></h1>
+            <p><canvas id="tweencanvas" width="512" height="512" style="border:1px solid #000000;"></canvas> &middot; <span id="timing"></span></p>
+        </body>
+        <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.all.js"></script>
+        <script type="module">
+import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.2';
+
+
+// WebGPU will delegate quantized ops to WebAssembly
+// therefore we detect if WebGPU is available and choose models as appropriate
+
+function sleep(delay) {
+  return new Promise((resolve) => setTimeout(resolve, delay))
+}
+
+async function fetchUint8Array(url) {
+    return new Uint8Array(await fetch(url, {mode: "cors"}).then(r => r.blob()).then(b => b.arrayBuffer()));
+}
+
+async function fetchUint8ArrayInSplitFiles(url, estimatedSize, splitSize, progressCallback) {
+    // first make the array that all the splits are going into
+    const totalArray = new Uint8Array(new ArrayBuffer(estimatedSize));
+    // then fetch all the splits in parallel
+    const splitCount = Math.ceil(estimatedSize/splitSize);
+    console.log({url, estimatedSize, splitSize, splitCount});
+    let splitsToFetch = splitCount;
+    const splitFilePromises = Array.from({length: splitCount});
+    for(let i=0; i<splitCount; i++) {
+        splitFilePromises[i] = fetchUint8Array(`${url}.${String(i).padStart(3, '0')}.db`);
+        if(i === 0) {
+            await splitFilePromises[i];
+        } else {
+            await sleep(20);
+        }
+    }
+    for(let i=0; i<splitCount; i++){
+        totalArray.set((await splitFilePromises[i]), i*splitSize);
+        splitsToFetch--;
+        if(progressCallback){
+            progressCallback(splitsToFetch);
+        }
+        splitFilePromises[i] = null
+    }
+    return totalArray;
+}
+
+const inferenceSessionParamDefaults = {executionProviders: ['webgpu', 'wasm'], 'intraOpNumThreads': 16, 'interOpNumThreads': 16};
+
+let unet_inference_session = null;
+let unet_inference_loading_latch = null;
+
+async function loadUnet() {
+    if (unet_inference_loading_latch) {
+        if (unet_inference_session) {
+            return true;
+        }
+        console.log("waiting for unet to load");
+        await sleep(1000);
+        return await loadUnet();
+    }
+    unet_inference_session = await ort.InferenceSession.create((await fetchUint8ArrayInSplitFiles(
+        ctl_unet_file,
+        sizes[ctl_unet_file],
+        50000000,
+        (splitsToFetch) => {state.unetSplitsToFetch = splitsToFetch;}
+    )), inferenceSessionParamDefaults);
+}
+
+let text_encoder_inference_session = null;
+let tokenizer = null;
+let text_encoder_inference_loading_latch = null;
+
+async function loadTextEncoder() {
+    if (text_encoder_inference_loading_latch) {
+        if (text_encoder_inference_session) {
+            return true;
+        }
+        console.log("waiting for text encoder to load");
+        await sleep(1000);
+        return await loadTextEncoder();
+    }
+    text_encoder_inference_loading_latch = true;
+    text_encoder_inference_session = await ort.InferenceSession.create((await fetchUint8ArrayInSplitFiles(
+        ctl_text_encoder_file,
+        sizes[ctl_text_encoder_file],
+        50000000,
+        (splitsToFetch) => {state.textEncoderSplitsToFetch = splitsToFetch;}
+    )), {executionProviders: ['wasm'], 'intraOpNumThreads': 16, 'interOpNumThreads': 16});
+    tokenizer = await AutoTokenizer.from_pretrained('Xenova/clip-vit-large-patch14')
+    return true;
+}
+
+let render_ocrb = await ort.InferenceSession.create((await fetchUint8Array(
+    "./render_ocrb.onnx",
+)), {executionProviders: ['wasm']});
+
+function smoothstep(x) {
+    return x * x * (3 - 2 * x);
+}
+
+// get the twenty four hour time as a string
+async function getTweenedTimeImage() {
+    const now = new Date();
+    const four_digit_time = `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+    // get the fractional part of the minute
+    const fractional_minute = smoothstep((now.getSeconds() + now.getMilliseconds() / 1000) / 60);
+    now.setMilliseconds(now.getMilliseconds() + 60 * 1000);
+    const next_four_digit_time = `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+    const oldMinuteTensor = new ort.Tensor("int64", BigInt64Array.from(four_digit_time.split("").map(c => BigInt(c))), [4]);
+    const newMinuteTensor = new ort.Tensor("int64", BigInt64Array.from(next_four_digit_time.split("").map(c => BigInt(c))), [4]);
+    const oldImage = (await render_ocrb.run({"four_digits": oldMinuteTensor})).image;
+    const newImage = (await render_ocrb.run({"four_digits": newMinuteTensor})).image;
+    const tweenedImage = Uint8Array.from({length: 512*512});
+    for(let i=0; i<512*512; i++){
+        tweenedImage[i] = oldImage.data[i] * (1 - fractional_minute) + newImage.data[i] * fractional_minute;
+    }
+    const tweencanvas = document.getElementById("tweencanvas");
+    const ctx = tweencanvas.getContext("2d");
+    const imageData = ctx.createImageData(512, 512);
+    for(let i=0; i<512*512; i++){
+        imageData.data[i*4] = tweenedImage[i];
+        imageData.data[i*4+1] = tweenedImage[i];
+        imageData.data[i*4+2] = tweenedImage[i];
+        imageData.data[i*4+3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return tweenedImage;
+}
+
+
+
+async function stringToPromptEmbeds(text) {
+    if (!text_encoder_inference_session) {
+        console.log("LOGIC ERROR LOLOLOL");
+        return
+    }
+    return (await text_encoder_inference_session.run({input_ids: new ort.Tensor('int64', tokenizer([text], {padding: true, truncation: true, max_length: tokenizer.model_max_length}).input_ids.data, [1,tokenizer.model_max_length])})).output_embeddings;
+}
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+function setRGBTensorToRGBACanvas(tensor, canvas) {
+    const imageData = ctx.createImageData(tensor.dims[1], tensor.dims[0]);
+    // take rgb data from output_image and set it to rgba imageData
+    for(let i=0; i<tensor.dims[0]*tensor.dims[1]; i++){
+        imageData.data[i*4] = tensor.data[i*3];
+        imageData.data[i*4+1] = tensor.data[i*3+1];
+        imageData.data[i*4+2] = tensor.data[i*3+2];
+        imageData.data[i*4+3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+}
+
+async function timeInMillis(fn) {
+    const startTime = Date.now();
+    await fn();
+    const endTime = Date.now();
+    return endTime - startTime;
+}
+
+
+const useGPUAcceleratedFloats = false; //navigator.gpu !== undefined;
+ort.env.wasm.numThreads = 16;
+
+const ctl_unet_file = useGPUAcceleratedFloats ? "./sd512fp16.onnx" : "./sd512q8.onnx";
+const ctl_text_encoder_file = useGPUAcceleratedFloats ? "./sd_text_encoder_fp16.onnx" : "./sd_text_encoder_q8.onnx";
+
+const sizes = {
+    "./sd512fp16.onnx": 969727877,
+    "./sd512q8.onnx": 779471314,
+    "./sd_text_encoder_fp16.onnx": 246256653,
+    "./sd_text_encoder_q8.onnx": 123815043,
+}
+
+
+const latents = new ort.Tensor("float32", Float32Array.from(
+    {length: 1*4*64*64}, () => Math.sqrt(-2 * Math.log(Math.random())) * Math.cos(2 * Math.PI * Math.random())
+), [1, 4, 64, 64]);
+
+const unet_warmup_params = ({
+    "image": new ort.Tensor("uint8", Uint8Array.from({length: 512*512}, () => 255), [512, 512]),
+    "prompt_embeds": new ort.Tensor("float32", Float32Array.from({length: 1*77*768}, () => 0.0), [1, 77, 768]),
+    "conditioning_scale": new ort.Tensor("float32", [0.0], [1]),
+    "latents": new ort.Tensor("float32", Float32Array.from({length: 1*4*64*64}, () => 0.1), [1, 4, 64, 64]),
+});
+
+
+let state = {
+    "canvas_latch": false, // in webgpu we can't have two simultaneous onnx sessions running
+    "prompt_latch": false,
+    "image": new ort.Tensor("uint8", Uint8Array.from({length: 512*512}, () => 255), [512, 512]),
+    "prompt": "underwater photo of kelp and starfish and sea anemones and turtles and small fish and sponges and coral",
+    "prompt_embeds": new ort.Tensor("float32", Float32Array.from({length: 1*77*768}, () => 0.2), [1, 77, 768]),
+    "prompt_embeds_dirty": false,
+    "conditioning_scale": new ort.Tensor("float32", [0.7], [1]),
+    "latents": latents,
+    lowEntropyRenderCount: 0,
+}
+
+async function startupUnet() {
+    const unetLoadTime = await timeInMillis(loadUnet);
+    const unetWarmupTime = await timeInMillis(() => unet_inference_session.run(unet_warmup_params));
+    console.log(`UNet load time: ${unetLoadTime}ms`);
+    console.log(`UNet warmup time: ${unetWarmupTime}ms`);
+    console.log("u-net startup complete");
+}
+
+async function startupTextEncoder() {
+    const textEncoderLoadTime = await timeInMillis(loadTextEncoder);
+    const textEncoderWarmupTime = await timeInMillis(() => stringToPromptEmbeds("a city"));
+    console.log(`Text encoder load time: ${textEncoderLoadTime}ms`);
+    console.log(`Text encoder warmup time: ${textEncoderWarmupTime}ms`);
+    console.log("text encoder startup complete");
+}
+
+async function startupApp() {
+    await startupUnet();
+    await render();
+    await connectInput();
+    await startupTextEncoder();
+    state.prompt_embeds_dirty = true;
+    renderLoop();
+}
+
+async function render() {
+    const {prompt_embeds, conditioning_scale, latents} = state;
+    const image = new ort.Tensor("uint8", (await getTweenedTimeImage()), [512, 512]);
+    const result = await unet_inference_session.run({image, prompt_embeds, conditioning_scale, latents});
+    setRGBTensorToRGBACanvas(result.output_image, canvas);
+    // if the top 25x25 square of the image is all black, the image is low entropy
+    // if the low entropy render count is over 10, we should reload the unet and text encoder
+    let pixelSum = 0;
+    for(let i=0; i<50; i++){
+        for(let j=0; j<50; j++){
+            pixelSum += result.output_image.data[(i*512+j)*3] + result.output_image.data[(i*512+j)*3+1] + result.output_image.data[(i*512+j)*3+2];
+        }
+    }
+    if(pixelSum === 0){
+        state.lowEntropyRenderCount++;
+    } else {
+        state.lowEntropyRenderCount = 0;
+    }
+    if(state.lowEntropyRenderCount > 10){
+        state.lowEntropyRenderCount = 0;
+        unet_inference_session = null;
+        // text_encoder_inference_session = null;
+        inferenceSessionParamDefaults.executionProviders = ['wasm'];
+        await startupUnet();
+        // await startupTextEncoder();
+    }
+    return true;
+}
+
+async function connectInput() {
+    const promptInput = document.getElementById("prompt");
+    const promptDefaults = document.getElementById("prompt-defaults");
+    promptInput.value = state.prompt;
+    promptInput.disabled = false;
+    promptInput.addEventListener("input", async (e) => {
+        state.prompt = e.target.value;
+        if(state.prompt_embeds_dirty){
+            console.log("typey typey for", state.prompt);
+            return;
+        }
+        console.log("rendering prompt embeds for", state.prompt);
+        state.prompt_embeds_dirty = true;
+        promptDefaults.value = "custom";
+    });
+    const conditioningScaleInput = document.getElementById("conditioning-scale");
+    conditioningScaleInput.value = state.conditioning_scale.data[0] * 100;
+    conditioningScaleInput.addEventListener("input", (e) => {
+        state.conditioning_scale = new ort.Tensor("float32", [e.target.value / 100], [1]);
+        // and set the range tooltip to the value
+        e.target.setAttribute("title", `Strength: ${e.target.value}`);
+    });
+    conditioningScaleInput.setAttribute("title", `Change how strong the image appears`);
+    // now that we have the prompt input, we can enable the dropdown
+    promptDefaults.addEventListener("change", async (e) => {
+        const prompt = e.target.value;
+        if(prompt === "custom"){
+            promptInput.disabled = false;
+            promptInput.focus();
+        } else {
+            promptInput.value = prompt;
+            state.prompt = prompt;
+            state.prompt_embeds_dirty = true;
+        }
+    });
+}
+
+async function cleanPromptEmbeds() {
+    if (state.prompt_embeds_dirty) {
+        const prompt = state.prompt;
+        console.log("cleaning prompt embeds for", prompt);
+        state.prompt_embeds = await stringToPromptEmbeds(prompt);
+        if (prompt === state.prompt) {
+            state.prompt_embeds_dirty = false;
+            console.log("prompt embeds rendered for", prompt);
+
+        } else {
+            console.log("quick typing! still dirty");
+            // cleanPromptEmbeds();
+        }
+    }
+}
+
+async function renderLoop() {
+    await cleanPromptEmbeds();
+    if(!state.prompt_embeds_dirty){
+        console.log("clean prompt embeds, let's render");
+        const renderTime = await timeInMillis(render);
+        document.getElementById("timing").innerText = `Render time: ${renderTime}ms`;
+    }
+
+    setTimeout(() => requestAnimationFrame(renderLoop), 100);
+}
+
+
+startupApp();
+</script>
+
+</html>
