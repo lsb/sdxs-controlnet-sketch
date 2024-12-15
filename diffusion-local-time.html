@@ -210,7 +210,7 @@ async function timeInMillis(fn) {
 }
 
 
-const useGPUAcceleratedFloats = false; //navigator.gpu !== undefined;
+const useGPUAcceleratedFloats = navigator.gpu !== undefined;
 ort.env.wasm.numThreads = 16;
 
 const ctl_unet_file = useGPUAcceleratedFloats ? "./sd512fp16.onnx" : "./sd512q8.onnx";
