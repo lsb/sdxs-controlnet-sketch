@@ -29,6 +29,7 @@
         }
         #tweencanvas { height: 2em; width: 2em; opacity: 0.5;}
         #timing { font-family: monospace; opacity: 0.5;}
+        #debugging { position: fixed; bottom: 0; right: 0; opacity: 0.5;}
         @font-face{font-family:"Roboto";font-style:normal;font-weight:400;src:url(./roboto-slab.ttf) format("truetype")}
         @font-face{font-family:"Roboto";font-style:normal;font-weight:700;src:url(./roboto-slab-bold.ttf) format("truetype")}
 
@@ -36,7 +37,6 @@
 </head>
     <body>
         <h1>Diffusion Local Time extra small</h1>
-        <h2>by Lee Butterman</h2>
         <h2>
             <!-- dropdown for sample prompts -->
             <select id="prompt-defaults">
@@ -47,12 +47,18 @@
                 <option selected="selected" value="underwater photo of kelp and starfish and sea anemones and turtles and small fish and sponges and coral">aquarium</option>
                 <option value="custom">custom diy :)</option>
             </select><input type="range" id="conditioning-scale" min="30" max="100" value="65" /><br>
-            <textarea id="prompt" disabled="disabled" cols="3" ></textarea></h2>
-            <h1><canvas id="canvas" width="512" height="512" style="border:1px solid #000000;"></canvas></h1>
-            <p><canvas id="tweencanvas" width="512" height="512" style="border:1px solid #000000;"></canvas> &middot; <span id="timing"></span></p>
-        </body>
-        <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.all.js"></script>
-        <script type="module">
+            <textarea id="prompt" disabled="disabled" cols="3" ></textarea>
+        </h2>
+        <h1><canvas id="canvas" width="512" height="512" style="border:1px solid #000000;"></canvas></h1>
+        <h3 id="loading-progress">
+            <div id="unet-progress-wrapper">Loading unet... <meter id="unet-progress"></meter></div>
+            <div id="text-encoder-progress-wrapper">Loading text encoder... <meter id="text-encoder-progress"></meter></div>
+        </h3>
+        <h2><i>&mdash;Lee Butterman, Dec 2024.<br><a href="https://leebutterman.com/2024/12/01/running-stable-diffusion-in-under-400-megabytes-in-the-browser-at-over-3-fps.html">how this was made &raquo;</a></i></h2>
+        <p id="debugging"><canvas id="tweencanvas" width="512" height="512" style="border:1px solid #000000;"></canvas> &middot; <span id="timing"></span></p>
+    </body>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.all.js"></script>
+    <script type="module">
 import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.2';
 
 
@@ -77,19 +83,13 @@ async function fetchUint8ArrayInSplitFiles(url, estimatedSize, splitSize, progre
     const splitFilePromises = Array.from({length: splitCount});
     for(let i=0; i<splitCount; i++) {
         splitFilePromises[i] = fetchUint8Array(`${url}.${String(i).padStart(3, '0')}.db`);
-        if(i === 0) {
-            await splitFilePromises[i];
-        } else {
-            await sleep(20);
-        }
-    }
-    for(let i=0; i<splitCount; i++){
         totalArray.set((await splitFilePromises[i]), i*splitSize);
         splitsToFetch--;
         if(progressCallback){
-            progressCallback(splitsToFetch);
+            progressCallback(1 - splitsToFetch/splitCount);
         }
         splitFilePromises[i] = null
+        await sleep(0);
     }
     return totalArray;
 }
@@ -112,7 +112,7 @@ async function loadUnet() {
         ctl_unet_file,
         sizes[ctl_unet_file],
         50000000,
-        (splitsToFetch) => {state.unetSplitsToFetch = splitsToFetch;}
+        (progress) => {document.getElementById("unet-progress").value = progress; document.getElementById("unet-progress-wrapper").style.visibility = progress === 0 ? "hidden": "visible" ;},
     )), inferenceSessionParamDefaults);
 }
 
@@ -134,7 +134,7 @@ async function loadTextEncoder() {
         ctl_text_encoder_file,
         sizes[ctl_text_encoder_file],
         50000000,
-        (splitsToFetch) => {state.textEncoderSplitsToFetch = splitsToFetch;}
+        (progress) => {document.getElementById("text-encoder-progress").value = progress; document.getElementById("text-encoder-progress-wrapper").style.visibility = progress === 0 ? "hidden": "visible" ;},
     )), {executionProviders: ['wasm'], 'intraOpNumThreads': 16, 'interOpNumThreads': 16});
     tokenizer = await AutoTokenizer.from_pretrained('Xenova/clip-vit-large-patch14')
     return true;
@@ -250,17 +250,19 @@ let state = {
 
 async function startupUnet() {
     const unetLoadTime = await timeInMillis(loadUnet);
-    const unetWarmupTime = await timeInMillis(() => unet_inference_session.run(unet_warmup_params));
+    // const unetWarmupTime = await timeInMillis(() => unet_inference_session.run(unet_warmup_params));
     console.log(`UNet load time: ${unetLoadTime}ms`);
-    console.log(`UNet warmup time: ${unetWarmupTime}ms`);
+    // console.log(`UNet warmup time: ${unetWarmupTime}ms`);
     console.log("u-net startup complete");
 }
 
 async function startupTextEncoder() {
     const textEncoderLoadTime = await timeInMillis(loadTextEncoder);
-    const textEncoderWarmupTime = await timeInMillis(() => stringToPromptEmbeds("a city"));
+    // const textEncoderWarmupTime = await timeInMillis(() => stringToPromptEmbeds("a city"));
+    // const textEncoderWarmupTime2 = await timeInMillis(() => stringToPromptEmbeds("a city"));
     console.log(`Text encoder load time: ${textEncoderLoadTime}ms`);
-    console.log(`Text encoder warmup time: ${textEncoderWarmupTime}ms`);
+    // console.log(`Text encoder warmup time: ${textEncoderWarmupTime}ms`);
+    // console.log(`Text encoder warmup time 2: ${textEncoderWarmupTime2}ms`);
     console.log("text encoder startup complete");
 }
 
