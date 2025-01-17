@@ -6,6 +6,18 @@
         * {
             box-sizing: border-box;
         }
+        @media (prefers-color-scheme: dark) {
+            body {
+                background-color: black;
+                color: white;
+            }
+        }
+        @media (prefers-color-scheme: light) {
+            body {
+                background-color: white;
+                color: black;
+            }
+        }
         html {
           box-sizing: border-box;
           font-size: 16px;
@@ -13,12 +25,30 @@
         body {
             font-family: Roboto;
         }
+        body.no-config .config {
+            display: none;
+        }
+        body.config .no-more-config {
+            display: none;
+        }
         fieldset {
             border: none;
         }
-        #boddy {
-            background-color: black;
-            color: white;
+        #canvas {
+            width: 100vh;
+            height: 100vh;
+            position: fixed;
+            top: 0;
+            left: 0;
+        }
+        .right-align {
+            position: fixed;
+            bottom: 0;
+            right: 0;
+            padding: 1em;
+            /* background-color: white; */
+            opacity: 0.9;
+            text-align: right;
         }
         #prompt {
             width: 512px;
@@ -29,33 +59,36 @@
         }
         #tweencanvas { height: 2em; width: 2em; opacity: 0.5;}
         #timing { font-family: monospace; opacity: 0.5;}
-        #debugging { position: fixed; bottom: 0; right: 0; opacity: 0.5;}
+        #debugging { position: fixed; top: 0; right: 0; opacity: 0.5;}
         @font-face{font-family:"Roboto";font-style:normal;font-weight:400;src:url(./roboto-slab.ttf) format("truetype")}
         @font-face{font-family:"Roboto";font-style:normal;font-weight:700;src:url(./roboto-slab-bold.ttf) format("truetype")}
 
     </style>
 </head>
-    <body>
-        <h1>Diffusion Local Time extra small</h1>
-        <h2>
+<body class="no-config">
+        <canvas id="canvas" width="512" height="512" style="border:1px solid #000000;"></canvas>
+        <div class="right-align">
+        <h1>Diffusion Local Time</h1>
+        <h2 class="config">
             <!-- dropdown for sample prompts -->
-            <select id="prompt-defaults">
+            <select id="prompt-defaults" disabled="disabled">
                 <option value="sunrise closeup of a desert landscape with large boulders and small boulders on a shallow lake bed surrounded by tall mountains">desert</option>
                 <option value="seashells on a beach">beach</option>
                 <option value="photo of cinnamon sticks and cardamom pods and cloves and peppercorns and star anise on a cutting board">spices</option>
                 <option value="ferns and boulders by a fast stream in a redwood forest with animals">redwoods</option>
                 <option selected="selected" value="underwater photo of kelp and starfish and sea anemones and turtles and small fish and sponges and coral">aquarium</option>
                 <option value="custom">custom diy :)</option>
-            </select><input type="range" id="conditioning-scale" min="30" max="100" value="65" /><br>
+            </select><br><input type="range" id="conditioning-scale" min="30" max="100" value="65" disabled="disabled" /><br>
             <textarea id="prompt" disabled="disabled" cols="3" ></textarea>
         </h2>
-        <h1><canvas id="canvas" width="512" height="512" style="border:1px solid #000000;"></canvas></h1>
-        <h3 id="loading-progress">
+        <h3 class="config" id="loading-progress">
             <div id="unet-progress-wrapper">Loading unet... <meter id="unet-progress"></meter></div>
             <div id="text-encoder-progress-wrapper">Loading text encoder... <meter id="text-encoder-progress"></meter></div>
         </h3>
-        <h2><i>&mdash;Lee Butterman, Dec 2024.<br><a href="https://leebutterman.com/2024/12/01/running-stable-diffusion-in-under-400-megabytes-in-the-browser-at-over-3-fps.html">how this was made &raquo;</a></i></h2>
-        <p id="debugging"><canvas id="tweencanvas" width="512" height="512" style="border:1px solid #000000;"></canvas> &middot; <span id="timing"></span></p>
+        <h2><i>&mdash;Lee Butterman, Dec 2024.</i></h2>
+        <h2><button class="no-more-config" onclick="document.body.className='config'">configure</button><button class="config" onclick="document.body.className='no-config'">done configuring</button> <a href="https://leebutterman.com/2024/12/01/running-stable-diffusion-in-under-400-megabytes-in-the-browser-at-over-3-fps.html">how this was made &raquo;</a></i></h2>
+        <p id="debugging" class="config"><select id="fp16q68"><option value="fp16">fp16</option><option value="q68" selected="selected">smol</option></select><span id="webgpu-failure-report"></span><canvas id="tweencanvas" width="512" height="512" style="border:1px solid #000000;"></canvas> &middot; <span id="timing"></span></p>
+        </div>
     </body>
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.all.js"></script>
     <script type="module">
@@ -213,12 +246,12 @@ async function timeInMillis(fn) {
 const useGPUAcceleratedFloats = navigator.gpu !== undefined;
 ort.env.wasm.numThreads = 16;
 
-const ctl_unet_file = useGPUAcceleratedFloats ? "./sd512fp16.onnx" : "./sd512q8.onnx";
-const ctl_text_encoder_file = useGPUAcceleratedFloats ? "./sd_text_encoder_fp16.onnx" : "./sd_text_encoder_q8.onnx";
+let ctl_unet_file = "./sd512q68.onnx";
+let ctl_text_encoder_file = "./sd_text_encoder_q8.onnx";
 
 const sizes = {
     "./sd512fp16.onnx": 969727877,
-    "./sd512q8.onnx": 779471314,
+    "./sd512q68.onnx": 428957688,
     "./sd_text_encoder_fp16.onnx": 246256653,
     "./sd_text_encoder_q8.onnx": 123815043,
 }
@@ -267,9 +300,8 @@ async function startupTextEncoder() {
 }
 
 async function startupApp() {
-    await startupUnet();
-    await render();
     await connectInput();
+    await startupUnet();
     await startupTextEncoder();
     state.prompt_embeds_dirty = true;
     renderLoop();
@@ -298,6 +330,7 @@ async function render() {
         unet_inference_session = null;
         // text_encoder_inference_session = null;
         inferenceSessionParamDefaults.executionProviders = ['wasm'];
+        document.getElementById("webgpu-failure-report").innerText = "WebGPU generated purely black images, falling back to WebAssembly.";
         await startupUnet();
         // await startupTextEncoder();
     }
@@ -339,6 +372,20 @@ async function connectInput() {
             state.prompt_embeds_dirty = true;
         }
     });
+    promptDefaults.disabled = false;
+    conditioningScaleInput.disabled = false;
+    const unetPrecision = document.getElementById("fp16q68");
+    unetPrecision.addEventListener("change", async (e) => {
+        const precision = e.target.value;
+        if(precision === "fp16"){
+            ctl_unet_file = "./sd512fp16.onnx";
+        } else {
+            ctl_unet_file = "./sd512q68.onnx";
+        }
+        unet_inference_session = null;
+        inferenceSessionParamDefaults.executionProviders = ['webgpu', 'wasm'];
+        await startupUnet();
+    });
 }
 
 async function cleanPromptEmbeds() {
@@ -359,7 +406,10 @@ async function cleanPromptEmbeds() {
 
 async function renderLoop() {
     await cleanPromptEmbeds();
-    if(!state.prompt_embeds_dirty){
+    if(!unet_inference_session) {
+        document.getElementById("timing").innerText = "Waiting for UNet to load...";
+    }
+    if(!state.prompt_embeds_dirty && !!unet_inference_session){
         console.log("clean prompt embeds, let's render");
         const renderTime = await timeInMillis(render);
         document.getElementById("timing").innerText = `Render time: ${renderTime}ms`;
