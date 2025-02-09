@@ -58,7 +58,7 @@
             width: 256px;
         }
         #tweencanvas { height: 2em; width: 2em; opacity: 0.5;}
-        #timing { font-family: monospace; opacity: 0.5;}
+        #timing, #texttiming { font-family: monospace; opacity: 0.5;}
         #debugging { position: fixed; top: 0; right: 0; opacity: 0.5;}
         @font-face{font-family:"Roboto";font-style:normal;font-weight:400;src:url(./roboto-slab.ttf) format("truetype")}
         @font-face{font-family:"Roboto";font-style:normal;font-weight:700;src:url(./roboto-slab-bold.ttf) format("truetype")}
@@ -87,7 +87,7 @@
         </h3>
         <h2><i>&mdash;Lee Butterman, Dec 2024.</i></h2>
         <h2><button class="no-more-config" onclick="document.body.className='config'">configure</button><button class="config" onclick="document.body.className='no-config'">done configuring</button> <a href="https://leebutterman.com/2024/12/01/running-stable-diffusion-in-under-400-megabytes-in-the-browser-at-over-3-fps.html">how this was made &raquo;</a></i></h2>
-        <p id="debugging" class="config"><select id="fp16q68"><option value="fp16">fp16</option><option value="q68" selected="selected">smol</option></select><span id="webgpu-failure-report"></span><canvas id="tweencanvas" width="512" height="512" style="border:1px solid #000000;"></canvas> &middot; <span id="timing"></span></p>
+        <p id="debugging" class="config"><select id="fp16q68"><option value="fp16">fp16</option><option value="q68" selected="selected">smol</option></select><span id="webgpu-failure-report"></span><canvas id="tweencanvas" width="512" height="512" style="border:1px solid #000000;"></canvas> &middot; <span id="timing"></span><span id="texttiming"></span></p>
         </div>
     </body>
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.all.js"></script>
@@ -392,10 +392,13 @@ async function cleanPromptEmbeds() {
     if (state.prompt_embeds_dirty) {
         const prompt = state.prompt;
         console.log("cleaning prompt embeds for", prompt);
+        const startTime = Date.now();
         state.prompt_embeds = await stringToPromptEmbeds(prompt);
+        const endTime = Date.now();
         if (prompt === state.prompt) {
             state.prompt_embeds_dirty = false;
             console.log("prompt embeds rendered for", prompt);
+            document.getElementById("texttiming").innerText = `Text encode time: ${endTime - startTime}ms`;
 
         } else {
             console.log("quick typing! still dirty");
